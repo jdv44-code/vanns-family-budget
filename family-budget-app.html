@@ -88,6 +88,16 @@
     margin:0 0 8px;
   }
   @media (max-width:640px){ .summary-grid{ flex-direction:column; } }
+
+  .shortfall-banner{
+    display:none; align-items:flex-start; gap:12px;
+    margin:0 0 22px; padding:15px 18px;
+    border-radius:10px; background:var(--danger-soft); border:1px solid rgba(193,104,92,0.35);
+  }
+  .shortfall-banner.show{ display:flex; }
+  .shortfall-banner .icon{ font-size:16px; line-height:1.3; }
+  .shortfall-banner .text{ font-size:13px; color:var(--ink); line-height:1.5; }
+  .shortfall-banner .text b{ color:var(--danger); font-weight:700; }
   .summary-card{
     background:transparent;
     border:none;
@@ -184,6 +194,22 @@
   .btn.danger:hover{ opacity:0.85; }
 
   .row-actions{ display:flex; gap:12px; margin-bottom:22px; flex-wrap:wrap; }
+
+  .bills-controls{ display:flex; gap:16px; flex-wrap:wrap; align-items:center; margin-bottom:22px; }
+  .filter-pills{ display:flex; gap:6px; flex-wrap:wrap; }
+  .filter-pill{
+    font-size:11.5px; font-weight:600; padding:6px 13px; border-radius:20px;
+    border:1px solid var(--border); background:transparent; cursor:pointer; color:var(--ink-soft);
+  }
+  .filter-pill.active{ background:var(--primary); color:#1C2530; border-color:var(--primary); }
+  .filter-pill:hover:not(.active){ border-color:var(--ink-faint); color:var(--ink); }
+  .sort-select-wrap{ display:flex; align-items:center; gap:8px; margin-left:auto; }
+  .sort-select-wrap label{ font-size:11.5px; color:var(--ink-soft); font-weight:600; }
+  .sort-select-wrap select{
+    padding:7px 10px; border-radius:7px; border:1px solid var(--border);
+    background:var(--surface-soft); color:var(--ink); font-family:'Inter', sans-serif; font-size:12.5px;
+  }
+  @media (max-width:640px){ .sort-select-wrap{ margin-left:0; } }
 
   /* Category breakdown donut */
   .donut-wrap{
@@ -361,6 +387,8 @@
 
   <div class="summary-grid" id="ticker"></div>
 
+  <div class="shortfall-banner" id="shortfallBanner"></div>
+
   <nav class="tabs" id="tabs">
     <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
     <button class="tab-btn" data-tab="bills">Bills</button>
@@ -470,6 +498,8 @@ let activeTab = 'dashboard';
 let calMonth = new Date().getMonth();
 let calYear = new Date().getFullYear();
 let editingBillId = null;
+let billFilter = 'all';
+let billSort = 'default';
 
 function todayStr(){ return new Date().toISOString().slice(0,10); }
 function fmtMoney(n){ return '$' + Number(n||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}); }
@@ -821,29 +851,39 @@ function renderDashboard(){
 }
 
 // ---------- Render: Bills ----------
+const BILL_FILTERS = [
+  {key:'all', label:'All'},
+  {key:'overdue', label:'Overdue'},
+  {key:'soon', label:'Due Soon'},
+  {key:'upcoming', label:'Upcoming'},
+  {key:'paid', label:'Paid'}
+];
+const BILL_SORTS = [
+  {key:'default', label:'Default (by category)'},
+  {key:'due-asc', label:'Due date — soonest first'},
+  {key:'due-desc', label:'Due date — latest first'},
+  {key:'amount-desc', label:'Amount — largest first'},
+  {key:'amount-asc', label:'Amount — smallest first'},
+  {key:'name-asc', label:'Name — A to Z'}
+];
+
 function renderBills(){
-  const withStatus = state.bills.map(b=>({...b, status:getBillStatus(b), due:getCurrentDue(b)}));
+  const allWithStatus = state.bills.map(b=>({...b, status:getBillStatus(b), due:getCurrentDue(b)}));
   const statusLabel = { overdue:'Overdue', soon:'Due Soon', upcoming:'Upcoming', paid:'Paid' };
 
-  const customCats = [...new Set(withStatus.map(b=>b.category).filter(c=>!CATEGORIES.includes(c)))].sort();
-  const orderedCats = [...CATEGORIES.slice(0, -1), ...customCats, 'Other'];
+  const withStatus = billFilter==='all' ? allWithStatus : allWithStatus.filter(b=>b.status===billFilter);
 
-  const groups = {};
-  orderedCats.forEach(c=>{ groups[c] = []; });
-  withStatus.forEach(b=>{
-    const cat = orderedCats.includes(b.category) ? b.category : 'Other';
-    groups[cat].push(b);
-  });
-  Object.values(groups).forEach(list=>list.sort((a,b)=>a.due.localeCompare(b.due)));
-
-  function billRow(b){
+  function billRow(b, showCategoryTag){
     return `
         <div class="bill-card ${b.status}">
           <div class="bill-main">
             <span class="bill-check ${b.status==='paid'?'checked':''}" ${b.status!=='paid' ? `data-mark-paid="${b.id}" style="cursor:pointer;"` : ''}>${b.status==='paid' ? '✓' : ''}</span>
             <div>
               <div class="bill-payee">${escapeHtml(b.payee)}</div>
-              ${b.recurrence!=='none' ? `<div class="bill-tags"><span class="tag">${b.recurrence}</span></div>` : ''}
+              <div class="bill-tags">
+                ${showCategoryTag ? `<span class="tag">${escapeHtml(b.category)}</span>` : ''}
+                ${b.recurrence!=='none' ? `<span class="tag">${b.recurrence}</span>` : ''}
+              </div>
             </div>
           </div>
           <div class="bill-due-amt">
@@ -860,36 +900,77 @@ function renderBills(){
     `;
   }
 
-  const sectionsHtml = orderedCats.map(cat=>{
-    const list = groups[cat];
-    if(!list.length) return '';
-    const subtotal = list.reduce((s,b)=> b.status==='paid' ? s : s+Number(b.amount), 0);
-    return `
-      <div class="category-section">
-        <div class="category-head">
-          <span class="category-name">${escapeHtml(cat)}</span>
-          <span class="category-count">${list.length} ${list.length===1?'bill':'bills'}</span>
-          <span class="category-subtotal">${fmtMoney(subtotal)} owed</span>
+  let bodyHtml = '';
+
+  if(!withStatus.length){
+    bodyHtml = `
+    <div class="empty-state">
+      <div class="glyph">📋</div>
+      ${billFilter==='all' ? 'No bills yet. Add one by hand, or upload a photo in chat and import the details.' : `No bills match "${BILL_FILTERS.find(f=>f.key===billFilter).label}" right now.`}
+    </div>`;
+  } else if(billSort === 'default'){
+    // Grouped by category, sorted by due date within each group
+    const customCats = [...new Set(withStatus.map(b=>b.category).filter(c=>!CATEGORIES.includes(c)))].sort();
+    const orderedCats = [...CATEGORIES.slice(0, -1), ...customCats, 'Other'];
+    const groups = {};
+    orderedCats.forEach(c=>{ groups[c] = []; });
+    withStatus.forEach(b=>{
+      const cat = orderedCats.includes(b.category) ? b.category : 'Other';
+      groups[cat].push(b);
+    });
+    Object.values(groups).forEach(list=>list.sort((a,b)=>a.due.localeCompare(b.due)));
+
+    bodyHtml = orderedCats.map(cat=>{
+      const list = groups[cat];
+      if(!list.length) return '';
+      const subtotal = list.reduce((s,b)=> b.status==='paid' ? s : s+Number(b.amount), 0);
+      return `
+        <div class="category-section">
+          <div class="category-head">
+            <span class="category-name">${escapeHtml(cat)}</span>
+            <span class="category-count">${list.length} ${list.length===1?'bill':'bills'}</span>
+            <span class="category-subtotal">${fmtMoney(subtotal)} owed</span>
+          </div>
+          <div class="bill-list">${list.map(b=>billRow(b, false)).join('')}</div>
         </div>
-        <div class="bill-list">${list.map(billRow).join('')}</div>
-      </div>
-    `;
-  }).join('');
+      `;
+    }).join('');
+  } else {
+    // Flat sorted list, category shown as a tag per row
+    const sorted = [...withStatus];
+    if(billSort==='due-asc') sorted.sort((a,b)=>a.due.localeCompare(b.due));
+    else if(billSort==='due-desc') sorted.sort((a,b)=>b.due.localeCompare(a.due));
+    else if(billSort==='amount-desc') sorted.sort((a,b)=>Number(b.amount)-Number(a.amount));
+    else if(billSort==='amount-asc') sorted.sort((a,b)=>Number(a.amount)-Number(b.amount));
+    else if(billSort==='name-asc') sorted.sort((a,b)=>a.payee.localeCompare(b.payee));
+    bodyHtml = `<div class="bill-list">${sorted.map(b=>billRow(b, true)).join('')}</div>`;
+  }
 
   document.getElementById('main').innerHTML = `
     <h2 class="section-title">Bills &amp; Debts</h2>
-    <div class="section-sub">Organized by category — ${withStatus.length} total.</div>
+    <div class="section-sub">${withStatus.length} of ${allWithStatus.length} bill${allWithStatus.length===1?'':'s'} shown.</div>
     <div class="row-actions">
       <button class="btn" id="addBillBtn">+ Add Bill</button>
     </div>
-    ${withStatus.length ? sectionsHtml : `
-    <div class="empty-state">
-      <div class="glyph">📋</div>
-      No bills yet. Add one by hand, or upload a photo in chat and import the details.
-    </div>`}
+    <div class="bills-controls">
+      <div class="filter-pills">
+        ${BILL_FILTERS.map(f=>`<button class="filter-pill ${billFilter===f.key?'active':''}" data-filter="${f.key}">${f.label} (${f.key==='all'?allWithStatus.length:allWithStatus.filter(b=>b.status===f.key).length})</button>`).join('')}
+      </div>
+      <div class="sort-select-wrap">
+        <label for="sortSelect">Sort</label>
+        <select id="sortSelect">
+          ${BILL_SORTS.map(s=>`<option value="${s.key}" ${billSort===s.key?'selected':''}>${s.label}</option>`).join('')}
+        </select>
+      </div>
+    </div>
+    ${bodyHtml}
   `;
 
   document.getElementById('addBillBtn').onclick = ()=>openBillModal();
+  document.querySelectorAll('.filter-pill').forEach(btn=>{
+    btn.onclick = ()=>{ billFilter = btn.dataset.filter; renderBills(); };
+  });
+  document.getElementById('sortSelect').onchange = (e)=>{ billSort = e.target.value; renderBills(); };
   withStatus.forEach(b=>{
     document.querySelectorAll(`[data-mark-paid="${b.id}"]`).forEach(el=>{ el.onclick = ()=>markPaid(b.id); });
     document.querySelector(`[data-edit-bill="${b.id}"]`).onclick = ()=>openBillModal(b.id);
@@ -1210,9 +1291,36 @@ function escapeHtml(str){
   return String(str).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+function renderShortfallBanner(){
+  const today = todayStr();
+  const unpaidTotal = state.bills.reduce((sum,b)=>{
+    return getBillStatus(b)==='paid' ? sum : sum + Number(b.amount);
+  }, 0);
+  const incomeTotal = state.paychecks
+    .filter(p=>p.date>=today)
+    .reduce((sum,p)=>sum+Number(p.amount), 0);
+
+  const el = document.getElementById('shortfallBanner');
+  const deficit = unpaidTotal - incomeTotal;
+
+  if(deficit > 0 && state.paychecks.length > 0){
+    el.className = 'shortfall-banner show';
+    el.innerHTML = `
+      <span class="icon">⚠️</span>
+      <span class="text">
+        <b>You're short ${fmtMoney(deficit)}</b> — your unpaid bills (${fmtMoney(unpaidTotal)}) add up to more than your upcoming logged income (${fmtMoney(incomeTotal)}). Worth a look at what can wait, or whether another paycheck needs adding.
+      </span>
+    `;
+  } else {
+    el.className = 'shortfall-banner';
+    el.innerHTML = '';
+  }
+}
+
 function render(){
   renderSheetsStatus();
   renderTicker();
+  renderShortfallBanner();
   if(activeTab==='dashboard') renderDashboard();
   else if(activeTab==='bills') renderBills();
   else if(activeTab==='paychecks') renderPaychecks();
